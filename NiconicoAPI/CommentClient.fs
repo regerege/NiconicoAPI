@@ -82,6 +82,7 @@ type CommentClient (gps:GetPlayerStatus) =
     let _thread : Thread option ref = ref None
     let _chat : Chat option ref = ref None
     let _postkey = new PostKeyArgs("")
+    let _recomment = ref ""
 //#endregion
 
     /// 送信文字列をbyte配列に変換してNULLを付け足す。
@@ -112,8 +113,13 @@ type CommentClient (gps:GetPlayerStatus) =
                 changedPostKeyEvent.Trigger(_postkey)
             ReciveData.ConnectionStatus _thread.Value.Value
         elif text.StartsWith("<chat_result") then
-            ReciveData.CommentResult
-                <| XmlReaders.ChatResultReader text
+            let cr = XmlReaders.ChatResultReader text
+            //POSTKEYの変更通知（コメ番不正などによって計算が狂う場合があるので、コメ番を-1に置き換えて、イベント側で再取得させる。）
+            if cr.Status = ChatResultStatus.PostKeyError then
+                _postkey.No <- -1
+                changedPostKeyEvent.Trigger(_postkey)
+                x.ReSendComment()
+            ReciveData.CommentResult cr
         elif text.StartsWith("<chat") then
             _chat := Some <| XmlReaders.ChatReader(gps, _thread.Value.Value, text)
             let no = _chat.Value.Value.No
@@ -142,6 +148,8 @@ type CommentClient (gps:GetPlayerStatus) =
     ///<param name="comment">コメント</param>
     member x.SendComment comment =
         if _thread.Value.IsSome then
+            _recomment := comment
+
             let comment = Commons.toHtmlDecode comment
 
             let t = _thread.Value.Value
@@ -159,6 +167,8 @@ type CommentClient (gps:GetPlayerStatus) =
             let xml = xml.Replace("mail=\"\"","")
             Debug.WriteLine(sprintf "%s" xml)
             x.Send xml
+    ///<summary>前回のコメントを再送信する。</summary>
+    member x.ReSendComment() = x.SendComment !_recomment
 
     ///<summary>コメントを非同期で送信する。</summary>
     ///<param name="comment">コメント</param>
@@ -236,7 +246,15 @@ type CommentClientHelper (cookie, id:string) =
     //イニシャライズ時の設定
     do
         _client.ChangedPostKeyEvent.Add(fun args ->
-            let postkey = _nhttp.GetPostkey args.BlockNo _gps.Ms.Thread
+            /// 不正コメ番号の場合はステータスXMLから再取得する。
+            let (threadid,blockno) =
+                if args.No = -1 then
+                    let _gps = _nhttp.GetStatus(_gps.Stream.Id)
+                    _gps.Ms.Thread, (_gps.Stream.CommentCount/100)
+                else
+                    _gps.Ms.Thread, args.BlockNo
+
+            let postkey = _nhttp.GetPostkey blockno threadid
             Debug.WriteLine(
                 sprintf "[%d,%d] POSTKEYのブロックNoが変更されました。"
                     <| args.No
