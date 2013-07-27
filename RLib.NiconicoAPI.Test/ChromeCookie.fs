@@ -2,7 +2,7 @@
 
 open System
 open System.Data
-open System.Data.SQLite
+open System.Data.Common
 open System.IO
 open System.Net
 
@@ -12,7 +12,7 @@ module ChromeCookie =
     let private getChromeCookieSql = @"
 SELECT creation_utc, host_key, name, value, path, expires_utc, secure, httponly, last_access_utc, has_expires, persistent
 FROM cookies
-WHERE (host_key LIKE '%nicovideo%')
+WHERE (host_key LIKE '%.nicovideo.jp') AND (name = 'user_session')
 "
     let getCookie() =
         let root = @"Google\Chrome\User Data\Default\Cookies"
@@ -33,29 +33,41 @@ WHERE (host_key LIKE '%nicovideo%')
         let cp (f:string) (t:string) =
             if not <| File.Exists t then
                 File.Copy(f,t)
+        let rm () =
+            try
+                if File.Exists cpath then
+                    File.Delete(cpath)
+                rmdir <| Path.Combine(Path.GetTempPath(), "Google")
+            with | _ -> ()
+        rm()
         mkdir <| Path.GetDirectoryName(cpath)
         cp path cpath
-        let rm () = rmdir <| Path.Combine(Path.GetTempPath(), "Google")
         let cs =
             @"Data Source={0};Pooling=true;FailIfMissing=false"
             |> (fun s -> String.Format(s,cpath))
+        let createCookie (dr:DbDataReader) =
+            try
+                let c = new Cookie()
+                c.Domain <- string dr.["host_key"]
+                c.Name <- string dr.["name"]
+                c.Value <- string dr.["value"]
+                c.Path <- string dr.["path"]
+                Some c
+            with
+            | ex ->
+                System.Diagnostics.Trace.WriteLine(ex.Message)
+                None
         let dbseq = seq {
-            use conn = new SQLiteConnection(cs)
-            use cmd = new SQLiteCommand()
-            cmd.CommandText <- getChromeCookieSql
+            let factory = DbProviderFactories.GetFactory("System.Data.SQLite")
+            use conn = factory.CreateConnection()
+            use cmd = factory.CreateCommand()
+            conn.ConnectionString <- cs
             cmd.Connection <- conn
+            cmd.CommandText <- getChromeCookieSql
             conn.Open()
             use dr = cmd.ExecuteReader()
             while dr.Read() do
-                let c = new Cookie()
-                c.Domain <- dr.GetString(1)
-                c.Name <- dr.GetString(2)
-                c.Value <- dr.GetString(3)
-                c.Path <- dr.GetString(4)
-//                c.Expires <- new DateTime(dr.GetInt64(5), DateTimeKind.Utc)
-//                c.Secure <- dr.GetInt32(6) = 0
-//                c.HttpOnly <- dr.GetInt32(7) = 0
-                yield c
+                yield createCookie dr
             dr.Dispose()
             cmd.Dispose()
             conn.Dispose()
@@ -63,7 +75,11 @@ WHERE (host_key LIKE '%nicovideo%')
         }
         try
             let cc = new CookieContainer()
-            dbseq |> Seq.iter(fun c -> cc.Add(c))
+            dbseq |> Seq.choose id |> Seq.iter(fun c ->
+                try
+                    cc.Add(c)
+                with | _ -> ())
             Some cc
         finally
             rm ()
+            ()
